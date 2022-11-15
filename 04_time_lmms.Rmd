@@ -1,0 +1,161 @@
+---
+title: "timeOmics"
+author: "Ashfaq Ali"
+date: "01/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Time omics analyses, sigle block
+
+```{r}
+library(timeOmics)
+```
+
+```{r}
+data_all <- readRDS("../data_sumExpfilImp.rds")
+
+Results <- readRDS("../DEResults.rds")
+sig1 <- lapply(Results, function(x) {dplyr::filter(x, adj.P.Val<0.05)})
+
+sig1 <- within(sig1, rm(All_rand, All_pcscore))
+pcs <- names(Results) %>% grep(.,pattern = "pcs")
+sig1List <- unlist(lapply(Results[pcs], function(x) {dplyr::filter(x, adj.P.Val<0.05) %>% rownames(x)}), use.names = FALSE) %>% unique()
+rowData(data_all)$variance <- assays(data_all)$loess %>% rowVars(na.rm = TRUE)
+data_f <- data_all[rownames(data_all) %in% sig1List, ]
+#data_f <- data_all[rowData(data_all)$variance>0.5 | rowData(data_all)$variance<5, ]
+
+data <- scale(assays(data_f)$loess) %>% t
+time <- as.numeric(colData(data_f)$timepoint)
+group1 <- as.factor(colData(data_f)$randomisation_code)
+group2 <- as.factor(colData(data_f)$binarysecout180daycpcscore)
+```
+## Use feature selection get the right proteins for time modelling
+ - linear models from Limma with outcome variables (Temperature/PCS score)
+ - important variables from mixomics
+
+```{r}
+lmms.output <- lmms::lmmSpline(data = data, time = time,
+                         sampleID = rownames(data), deri = FALSE,
+                         basis = "p-spline", numCores = 4, timePredict = 1:3,
+                         keepModels = TRUE)
+modelled.data <- t(slot(lmms.output, 'predSpline'))
+
+```
+
+```{r}
+tst <-lapply(lmms.output@models, function(x) {
+ coefs <- summary(x)$coef 
+ return(coefs)})
+
+lapply(tst, function(x)
+  ts <- x[2,]
+  )
+```
+
+
+```{r}
+data.gathered <- modelled.data %>% as.data.frame() %>% 
+  rownames_to_column("time") %>%
+  mutate(time = as.numeric(time)) %>%
+  pivot_longer(names_to="feature", values_to = 'value', -time)
+
+# plot profiles
+ggplot(data.gathered, aes(x = time, y = value, color = feature)) + geom_line() +
+  theme_bw() + ggtitle("`lmms` profiles") + ylab("Feature expression") +
+  xlab("Time")
+```
+
+
+
+```{r}
+sig2list
+data_f2 <- data_all[rownames(data_all) %in% sig2list, ]
+#data_f <- data_all[rowData(data_all)$variance>0.5 | rowData(data_all)$variance<5, ]
+
+dataf2 <- scale(assays(data_f2)$loess) %>% t
+time <- as.numeric(colData(data_f2)$timepoint)
+group1 <- as.factor(colData(data_f2)$randomisation_code)
+group2 <- as.factor(colData(data_f2)$binarysecout180daycpcscore)
+
+lmms.output2 <- lmms::lmmSpline(data = dataf2, time = time,
+                         sampleID = rownames(data_f2), deri = FALSE,
+                         basis = "p-spline", numCores = 4, timePredict = 1:3,
+                         keepModels = TRUE)
+modelled.data <- t(slot(lmms.output, 'predSpline'))
+
+```
+
+
+
+```{r}
+ library(broom)
+ tidy(model)
+ tidy(model_results[1])
+ lapply(model_results,  tidy)
+model_results <- slot(lmms.output, "models")
+```
+
+```{r}
+data.gathered <- modelled.data %>% as.data.frame() %>% 
+  rownames_to_column("time") %>%
+  mutate(time = as.numeric(time)) %>%
+  pivot_longer(names_to="feature", values_to = 'value', -time)
+
+# plot profiles
+ggplot(data.gathered, aes(x = time, y = value, color = feature)) + geom_line() +
+  theme_bw() + ggtitle("`lmms` profiles") + ylab("Feature expression") +
+  xlab("Time")
+```
+
+```{r}
+filter.res <- lmms.filter.lines(data = data, 
+                                lmms.obj = lmms.output, time = time)
+profile.filtered <- filter.res$filtered
+```
+
+```{r}
+data.gathered_f <- filter.res$filtered %>% as.data.frame() %>% 
+  rownames_to_column("time") %>%
+  mutate(time = as.numeric(time)) %>%
+  pivot_longer(names_to="feature", values_to = 'value', -time)
+
+# plot profiles
+ggplot(data.gathered_f, aes(x = time, y = value, color = feature)) + geom_line() +
+  theme_bw() + ggtitle("`lmms` profiles") + ylab("Feature expression") +
+  xlab("Time")
+```
+
+
+```{r}
+# run pca
+pca.res <- pca(X = profile.filtered, ncomp = 3, scale=FALSE, center=FALSE)
+
+# tuning ncomp
+pca.ncomp <- getNcomp(pca.res, max.ncomp = 2, X = profile.filtered, 
+                      scale = FALSE, center=FALSE)
+
+pca.cluster <- getCluster(pca.res)
+head(pca.cluster)
+```
+
+```{r}
+plotIndiv(pca.res)
+```
+```{r}
+plotVar(pca.res)
+```
+
+```{r}
+plotLoadings(pca.res)
+```
+
+
+```{r}
+plotLong(pca.res, scale = FALSE, center = FALSE, 
+         title = "PCA longitudinal clustering")
+```
+

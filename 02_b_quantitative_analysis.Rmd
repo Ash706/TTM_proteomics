@@ -1,0 +1,251 @@
+---
+title: "02_b_quantitative_analysis"
+author: "Filip Årman"
+date: "6/14/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+
+```{r setup1, echo=FALSE ,include=FALSE}
+# import libraries and data
+
+library(tidyverse)
+library(reshape2)
+library(readxl)
+library(fuzzyjoin)
+library(limma)
+library(DBI)
+library(ggplot2)
+library(BiocGenerics)
+library(devtools)
+library(qvalue)
+library(ComplexHeatmap)
+library(RColorBrewer)
+nn_qc_tbl <- read_tsv("/home/rstudio/data/01_quality_check_table_plasma_lib.tsv", 
+                       col_names = TRUE
+                        )
+# Divide to patient id
+nn_qc_tbl <- nn_qc_tbl %>% dplyr::rowwise() %>% mutate(patient_id = str_split(str_split(sample, "-TTM-M-")[[1]][1], " ")[[1]][1]) 
+# log2 of quantitative intensity
+nn_qc_tbl <- nn_qc_tbl %>% mutate(quant_int_log2 = log2(quant_int) )
+# scale within sample group
+nn_qc_tbl <- nn_qc_tbl %>% group_by(sample) %>% mutate(scale_log2 = scale(quant_int_log2))
+```
+## Including Plot
+
+```{r pca,include=FALSE , echo=FALSE}
+# Prepare for PCA
+df_w <- dcast(nn_qc_tbl, `PG.ProteinGroups` ~ sample,value.var = "scale_log10")
+rownames(df_w) <- df_w[,1]
+df_w <- df_w[,-1]
+df_t <- iris[1:4]
+head(df_w)
+pca_princomp <- princomp(df_w, scale. = TRUE)
+summary(pca_princomp)
+# PC 1 and 2 
+pca_score <- pca_princomp$score[,1:2]
+title <- "PCA"
+plt_dot <- ggplot(pca_score %>% as.data.frame(), aes(Comp.1,Comp.2)) +
+                        geom_point() +
+  theme(axis.text.x= element_text(angle = 0, vjust = 1, hjust=0.5 ,size = 10)) + 
+  ggtitle(paste0(title)) 
+(plt_dot)
+
+```
+
+1. Pearson correlation of mean protein expression over timepoints clustered by similar trends: each line represents a protein 
+```{r logFC, echo=TRUE, fig.height=20, fig.width=12, include=TRUE}
+# mean protein expression by timepoint
+mean_timepoint <- nn_qc_tbl %>% group_by(`PG.ProteinGroups`,time) %>% mutate(m_tp = mean(scale_log10)) %>% distinct(`PG.ProteinGroups`,time,m_tp) 
+
+
+m_t_w <- reshape2::dcast(mean_timepoint, `PG.ProteinGroups` ~ time,value.var = "m_tp")
+m_t_w <- m_t_w %>% dplyr::rowwise() %>% mutate(`PG.ProteinGroups` = as.character(list(str_split(`PG.ProteinGroups`,";")[[1]][1])))
+
+m_t_w_fc <- m_t_w   
+
+m_t_w <- m_t_w %>% column_to_rownames(var = "PG.ProteinGroups") 
+m_t_w <- as.matrix(m_t_w)
+
+# Scale by protein group
+m_t_w <- t(scale(t(m_t_w), center = T, scale = T ))
+
+head(m_t_w)
+rows.cor <- cor(t(m_t_w), use = "pairwise.complete.obs", method = "pearson")
+hclust.row <- hclust(as.dist(1-rows.cor))
+
+
+clusters <- cutree(hclust.row, 16)
+m_t_w_c <- as.data.frame(m_t_w) %>% mutate(cluster = as.factor(clusters))
+
+m_t_w_c <- m_t_w_c %>% mutate("PG.ProteinGroups" = rownames(m_t_w_c))
+
+
+
+
+title <- "Protein expression by time"
+plt_prot_dot_z <- ggplot( melt(data = m_t_w_c, id.vars = c("PG.ProteinGroups","cluster"), measure.vars = colnames(m_t_w_c)[1:3] , variable.name = 'time'), 
+                        aes(x = as.factor(time), y = value, group = `PG.ProteinGroups`, colour = cluster )) +
+                        geom_line() +
+                        geom_point() +  
+                        geom_text(aes(label=ifelse(value<(-2) & time == "-24-",as.character(`PG.ProteinGroups`),'')),hjust=1,vjust=0) +
+  theme(axis.text.x= element_text(angle = 0, vjust = 1, hjust=0.5 ,size = 10)) + 
+  facet_wrap( ~ cluster) +
+  ggtitle(paste0(title)) 
+(plt_prot_dot_z)
+
+```
+
+2. T-tests with 0.01 fdr correction 
+
+```{r lmfit,include=TRUE , echo=TRUE}
+# Function normal t-test
+t_test <- function(dt,grp1,grp2,alt = 'two.sided',pair = FALSE){
+  # Subset control group and convert to numeric
+  
+  x <- dt[grp1] %>% unlist %>% as.numeric()
+  # Subset treatment group and convert to numeric
+  y <- dt[grp2] %>% unlist %>% as.numeric()
+  # Perform t-test using the mean of x and y,
+  result <- t.test(x, y, alternative = alt, paired = pair )
+  # Extract p-values from the results
+  p_vals <- tibble(p_val = result$p.value)
+  # Return p-values
+  return(p_vals)
+} 
+
+# Prepare and group samples by timepoint
+timepoints <- c("24-48","48-72","24-72"); row_attr <- "PG.ProteinGroups"
+col_attr <- "sample"; value <- "scale_log10"
+
+# lists to keep multiple sample and design dataframes for limma analysis
+df_samples <- list()
+df_design <- list()
+fits <- list()
+
+# Prepare datasets 
+for (comp in timepoints){ 
+  first <- str_split(comp,"-")[[1]][1]
+  last <- str_split(comp,"-")[[1]][2]
+  df_w <- dcast(nn_qc_tbl %>% filter(time == paste0("-",first,"-") | time == paste0("-",last,"-") ), `PG.ProteinGroups` ~ sample,value.var = "scale_log10")
+  df_w <- df_w %>% column_to_rownames(var = "PG.ProteinGroups") 
+  df_w <- as.matrix(df_w)
+  df_samples[[comp]] <- df_w
+  pat <- paste0(".*-",first,"-.+|.*-",last,"-.+")
+  df_design[[comp]] <- data.frame( sample_id = na.omit(str_match(colnames(df_w), pattern = pat))) %>% 
+                      dplyr::rowwise() %>% mutate(grp1 = 0, grp1v2 = if_else(str_detect(sample_id, pattern = first),0,1)) %>% 
+                      column_to_rownames(var = "sample_id") %>% as.matrix()  
+
+  # limma t-test
+  #fit <- lmFit(df_samples[[comp]],df_design[[comp]])
+  #fit <- eBayes(fit)
+  #fits[[comp]] <- fit
+
+  }
+
+tbl_pvals <- list()
+for (comp in timepoints){ 
+  grp1 <- str_split(comp,"-")[[1]][1]
+  grp2 <- str_split(comp,"-")[[1]][2]
+  fc <- "logFC"
+  # Calculate fold-change 
+  m_t_w_fc <- reshape2::dcast(mean_timepoint, `PG.ProteinGroups` ~ time,value.var = "m_tp")
+  m_t_w_fc[,fc] <- m_t_w_fc[,paste0("-",grp1,"-")] - m_t_w[,paste0("-",grp2,"-")]
+  # Multiple t-tests between the sample groups
+  tbl_ttest <- plyr::adply(df_samples[[comp]], .margins = 1, .fun = t_test,
+                                  grp1= na.omit(str_match(colnames(df_samples[[comp]]), pattern = paste0(".*-",grp1,"-.+")))[,1], grp2 = na.omit(str_match(colnames(df_samples[[comp]]), pattern = paste0(".*-",grp2,"-.+")))[,1] )    %>% as_tibble()  
+  # calclate q-values for multiple testing
+  qv <- qvalue(p = tbl_ttest$p_val, fdr.level = 0.01 )
+  # add qvalues to ttest table
+  tbl_ttest[,"q_value"] <- qv$qvalues
+  # add foldchange to ttest tanöe
+  tbl_ttest[,fc] <- m_t_w_fc[,fc]
+  
+  tbl_pvals[[comp]] <- tbl_ttest
+  }
+
+
+
+
+```
+3. Volcanoplots of protein diff expression between timepoints
+
+``` {r volcanoplot, fig.height=8, fig.width=10,include=TRUE , echo=TRUE}
+thr_fc <- 0.5 # log foldchange
+thr_sig <- 1.3 # p.val
+#top_tables <- list()
+#for (comp in timepoints){
+ # tt <- topTable(fits[[comp]],coef= 1,adjust.method = "BH", number=length(fit$p.value)) %>% mutate(log_adj_p = -1*log10(adj.P.Val))
+
+ #  tt <- tt %>% mutate(threshold = if_else(logFC >= thr_fc & log_adj_p >= thr_sig | logFC <= -thr_fc & log_adj_p >= thr_sig,"A","B"))
+ # top_tables[[comp]] <- tt
+   
+#}
+tbl_pvals_thr <- list()
+for (comp in timepoints){
+  title <- paste0("protein differential expression: ",comp)
+  tt <- tbl_pvals[[comp]] %>% mutate(log_qval = -1*log10(q_value))
+
+  tt <- tt %>% mutate(threshold = if_else(logFC >= thr_fc & log_qval >= thr_sig | 
+                                                    logFC <= -thr_fc & log_qval >= thr_sig,"A","B"))
+  tbl_pvals_thr[[comp]] <- tt
+    volcano_plt <- ggplot(tt,aes(logFC,log_qval, colour = threshold)) + geom_point(alpha = 0.5) +
+    # Add dotted lines to indicate the threshold, semi-transparent
+    geom_hline(yintercept = thr_sig, linetype = 2, alpha = 0.5) + 
+    geom_vline(xintercept = thr_fc, linetype = 2, alpha = 0.5) +
+    geom_vline(xintercept = -thr_fc, linetype = 2, alpha = 0.5) +
+    # Set the colour of the points
+    scale_colour_manual(values = c("A"= "forestgreen", "B"= "gray")) +
+    xlab("logfold change") + ylab("-log10 q-value") + # Relabel the axes
+    theme_bw() + # Set the theme
+    theme(legend.position="none") +
+    ggtitle(paste0(title))  
+plot(volcano_plt)    
+
+}
+
+
+```
+Heatmaps with "protein ~ diff_timepoints value: -log10 q-value" and "protein ~ diff_timepoints, value: log foldchange", both heatmaps are shown with proteins clustered based on q-values
+
+```{r heatmap,fig.height=60, fig.width=12 ,include=TRUE , echo=TRUE}
+
+
+tbl_pvals_thr[["24-48"]] <- tbl_pvals_thr[["24-48"]] %>% mutate( diff_comp = "24-48")
+tbl_pvals_thr[["48-72"]] <- tbl_pvals_thr[["48-72"]] %>% mutate( diff_comp = "48-72")
+tbl_pvals_thr[["24-72"]] <- tbl_pvals_thr[["24-72"]] %>% mutate( diff_comp = "24-72")
+
+df_test <- rbind(tbl_pvals_thr[["24-48"]], tbl_pvals_thr[["48-72"]], tbl_pvals_thr[["24-72"]]) %>% dplyr::rowwise() %>% mutate(X1 = as.character(list(str_split(X1,";")[[1]][1]))) %>% dplyr::rename("Protein"="X1")
+# attach cluster
+df_test_cluster <- left_join(df_test,m_t_w_c, by = c("Protein" = "PG.ProteinGroups" ) )
+
+# Show all proteins if in any group log_qval >= 1.3
+hm_prot_qvals <- reshape2::dcast(df_test_cluster, Protein ~ diff_comp, value.var = "log_qval") %>% dplyr::rowwise() %>% filter_if(is.double,any_vars(. >= 1.3)) %>% column_to_rownames("Protein") %>% as.matrix
+
+# Cluster rows(proteins) by similar log_qvalue
+hm_row_qval_cluster <- hclust(dist(method ="euclidean",hm_prot_qvals))
+
+mypalette<-brewer.pal(9,"OrRd")
+
+ComplexHeatmap::Heatmap(hm_prot_qvals, 
+                        col = mypalette,cluster_columns = FALSE, cluster_rows = hm_row_qval_cluster, column_order = c(1,3,2), heatmap_legend_param = list( title = "-log10_q-value")   )
+
+hm_prot_logfc <- reshape2::dcast(df_test_cluster, Protein ~ diff_comp, value.var = "logFC") %>% filter(Protein %in% rownames(hm_prot_qvals)) %>% column_to_rownames("Protein") %>% as.matrix
+
+
+mypalette<-brewer.pal(9,"RdBu")
+ComplexHeatmap::Heatmap(hm_prot_logfc, 
+                        col = rev(mypalette),cluster_columns = FALSE, cluster_rows = hm_row_qval_cluster, column_order = c(1,3,2), heatmap_legend_param = list( title = "logFC") )
+
+
+```

@@ -1,0 +1,263 @@
+---
+title: "Sample level integration of the three timepoints"
+author: "Ashfaq Ali"
+date: "01/12/2021"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      collapse = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      cache = FALSE, 
+                      cache.path = "../cache/", 
+                      fig.height = 5, 
+                      fig.width = 6,
+                      eval=TRUE)
+```
+
+```{r}
+library(mixOmics)
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+data_all <- readRDS("../data_sumExpfilImp.rds")
+
+rowData(data_all)$variance <- assays(data_all)$loess %>% rowVars(na.rm = TRUE)
+
+```
+
+# Sample level data integration vs. feature level integration.
+
+In the sample level data integration, we investigate how individual data sets at 24h, 48h and 72h and how features(proteins) in these data sets are related to the phenotype variable. This is usually applicable when the same samples are measured using multiple technologies. This analyses can be useful effect if sample level integration required to identify correlated features from different time-points and how they are jointly correlated. The advantage here can that the same feature do not have to be measured in different studies.
+
+
+
+```{r, include=FALSE,eval=FALSE}
+diab_dat <- list()
+X <- list(t1 = assays(data_all[, data_all$time=="-24-" & !is.na(data_all$randomisation_code)])$loess,
+          t2 = assays(data_all[, data_all$time=="-48-" & !is.na(data_all$randomisation_code)])$loess, 
+          t3 = assays(data_all[, data_all$time=="-72-" & !is.na(data_all$randomisation_code)])$loess)
+
+cols <- lapply(lapply(X, colnames), function(x) str_split(x,pattern = "_", simplify = TRUE)[,1]) # remove trailing time point id
+
+## Rename all matrices of the lins
+for (i in 1:length(X)){
+  colnames(X[[i]]) <- cols[[i]]
+}
+
+## common samples in 3 timepoints
+cols <- Reduce(intersect, cols)
+
+Xrand <-  lapply(X, function(x) t(x[, cols]))  ## Select common samples
+
+y_data <- data_all[, data_all$time=="-24-" & 
+                     !is.na(data_all$randomisation_code) & 
+                     data_all$screening_number %in% cols
+                   ] %>% colData()
+
+Yrand <- as.factor(y_data$randomisation_code)
+Ycpc <- as.factor(y_data$binarysecout180daycpcscore)
+#Y3 <- as.factor(y_data$shockable)
+names(Y) <- rownames(y_data)
+
+#saveRDS(list(X,Y,Y2, y_data, cols), "../plsdat_data_diablo.rds")
+```
+
+
+## Randomization code
+
+```{r}
+diablo_res <- readRDS("Results/diablo_results.rds")
+# diablo_res <- list()
+# diablo_res$randSplsda <- block.splsda(X = Xrand, Y = Yrand, ncomp = 5)
+
+plotIndiv(diablo_res$randSplsda,study = 'global', ellipse = TRUE)
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+# mpls <- list()
+# perf <- paste0(opt$outcome, "perf.diablo")
+
+set.seed(123) # for reproducibility, only when the `cpus' argument is not used
+t1 <- proc.time()
+diablo_res$perf.pls.rand <- perf(diablo_res$randSplsda, validation = "Mfold", folds = 10, nrepeat = 3, cpus = 5)
+t2 <- proc.time()
+running_time <- t2 - t1
+running_time
+```
+
+
+
+
+```{r, include=FALSE, eval=FALSE}
+#### Identify optimal number of features
+diablo_res$design <- matrix(0.1,
+  ncol = length(Xrand), nrow = length(Xrand),
+  dimnames = list(names(Xrand), names(Xrand))
+)
+diag(diablo_res$design) <- 0
+
+## Identify number of features for each dataset
+
+diablo_res$list.keepX <- list(t1 = c(4:10, 12, 14, 16, 18, 20), t2 = c(4:10, 12, 14, 16, 18, 20),t3= c(4:10, 12, 14, 16, 18, 20))
+# list.keepX <- list(mRNA= c(5,  seq(20, 60, 10)), protein = c(5,  seq(20, 60, 10)))
+
+
+# tune <- paste0(opt$outcome, tune.diablo)
+BPPARAM <- BiocParallel::MulticoreParam(workers = parallel::detectCores()-1)
+BPPARAM
+tune.pls <- tune.block.splsda(X, Y2,
+  ncomp = 3, # we suggest to push ncomp a bit more, e.g. 4
+  validation = "Mfold", dist = "max.dist", progressBar = TRUE,
+  test.keepX = list.keepX, design=design,
+  folds = 5, nrepeat = 3,  BPPARAM = BPPARAM
+) # suggested nrepeat = 50
+
+
+ncomp <- tune.pls$choice.ncomp$ncomp # optimal number of components based on t-tests on the error rate
+select.keepX <- tune.pls$choice.keepX # optimal number of variables to select
+
+# results <- paste0(opt$outcome, results.diablo)
+results.dblo <- block.splsda(X = X, Y = Y2, keepX = select.keepX, ncomp = 4, max.iter = 30)
+
+```
+
+
+
+## CPC score
+
+
+```{r, include=FALSE, eval=FALSE}
+diablo_res$CPCSplsda <- block.splsda(X = Xrand, Y = Ycpc, ncomp = 5)
+```
+
+
+```{r}
+plotIndiv(diablo_res$CPCSplsda,study = 'global', ellipse = TRUE)
+```
+
+```{r, include=FALSE, eval=FALSE}
+# mpls <- list()
+# perf <- paste0(opt$outcome, "perf.diablo")
+
+set.seed(123) # for reproducibility, only when the `cpus' argument is not used
+t1 <- proc.time()
+diablo_res$perf.pls.cpc <- perf(diablo_res$CPCSplsda, validation = "Mfold", folds = 10, nrepeat = 3, cpus = 5)
+t2 <- proc.time()
+running_time <- t2 - t1
+running_time
+```
+
+```{r, eval=FALSE, include=FALSE}
+plot(diablo_res$perf.pls.cpc , col = color.mixo(5:7))
+```
+
+## Shockable vs. non-shockable
+
+```{r, include=FALSE, eval=FALSE}
+y_data_s <- y_data[y_data$shockable==0 | y_data$shockable==1 & !is.na(y_data$shockable),]
+Xs <- lapply(X, function(x) t(x[, y_data_s$screening_number]))
+Yshock <- as.factor(y_data_s$shockable)
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+diablo_res$ShockSplsda <- block.splsda(X = Xs, Y = Yshock, ncomp = 5)
+```
+
+
+```{r}
+plotIndiv(diablo_res$ShockSplsda,study = 'global', ellipse = TRUE, X.label = "PC1", Y.label = "PC2")
+
+```
+
+
+
+
+```{r, eval=FALSE, include=FALSE}
+plotDiablo(results.dblo)
+```
+
+```{r}
+saveRDS(diablo_res, "Results/diablo_results.rds")
+1+1
+knitr::knit_exit()
+```
+
+
+
+
+```{r}
+vars <- selectVar(results.dblo, comp = 1, block = c(1, 2))
+vars <- list(proteins = vars$protein$value %>% rownames_to_column(), mRNA = vars$mRNA$value %>% rownames_to_column())
+```
+
+
+
+```{r, include=FALSE, eval=FALSE}
+mint.plsda.res.perf = mint.plsda(X = mint_data$protein, Y = mint_data$Y, study = mint_data$study, ncomp = 5)
+
+set.seed(2543)  # for reproducible result in this example
+## S3 method for class 'splsda'
+perf(object, 
+dist = c("all", "max.dist", "centroids.dist", "mahalanobis.dist"),
+validation = c("Mfold", "loo"),
+folds = 10, nrepeat =5, auc = FALSE, progressBar = TRUE, cpus, ...)
+perf.mint.plsda.cell <- perf(mint.plsda.res.perf, validation = "Mfold", folds = 5, 
+                  progressBar = FALSE, auc = TRUE) 
+
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+list.keepX <- list(t1 = c(10, 10, 10), t2 = c(15,10, 10), t3 = c(10, 10,10))
+diablo_rand <- block.splsda(X, Y, keepX=list.keepX, ncomp = 3)
+plotIndiv(diablo_rand, comp = c(1,2)) ## sample plot
+
+plotVar(diablo_rand)
+```
+
+```{r, include=FALSE, eval=FALSE}
+plotDiablo(diablo_rand)
+
+circosPlot(diablo_rand, cutoff = 0.7)
+
+auc_t1 <- auroc(diablo_rand, roc.block = "t1", roc.comp = 3)
+
+
+auc_t2 <- auroc(diablo_rand, roc.block = "t2", roc.comp = 3)
+
+
+auc_t2 <- auroc(diablo_rand, roc.block = "t3", roc.comp = 2)
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+Y2 <- as.factor(y_data$binarysecout180daycpcscore)
+
+plsda.res.perf = mint.plsda(X = mint_data$protein, Y = mint_data$Y, study = mint_data$study, ncomp = 5)
+
+set.seed(2543)  # for reproducible result in this example
+perf.mint.plsda.cell <- perf(mint.plsda.res.perf, validation = "Mfold", folds = 5, 
+                  progressBar = FALSE, auc = TRUE) 
+
+plot(perf.mint.plsda.cell, col = color.mixo(5:7))
+
+#names(Y) <- rownames(y_data)
+summary(Y2)
+
+list.keepX2 <- list(t1 = c(10, 10), t2 = c(15,10), t3 = c(10, 10))
+
+diablo_cpc <- block.splsda(X, Y2, keepX=list.keepX2, ncomp = 3)
+
+plotIndiv(diablo_cpc, ind.names = FALSE ,comp = c(1,2), ellipse = TRUE) ## sample plot
+plotDiablo(diablo_cpc)
+```
+
+

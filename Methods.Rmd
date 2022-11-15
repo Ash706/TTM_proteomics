@@ -1,0 +1,111 @@
+---
+title: "Materials and Methods"
+author: "Ashfaq Ali"
+date: '2022-04-07'
+output: html_document
+bibliography: packages.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## QC and statistical analyses
+
+> Data QC: Sample ID *SEHBG0019* missing in the clinical data
+ - Samples IDs *SEMAL* in proteomics while *SEMMO* in the clinical data
+ 
+### Data filtering 
+
+Data was analysed for patterns in missingness using `mice`package in R to identify any samples of proteins. 
+*Missing values:* Proteins missing in more than 30% of the samples were filtered out.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(SummarizedExperiment)
+library("tidyverse")
+sumExpObj <- readRDS( "../rawaDataSe.rds")
+data_all <- readRDS("../data_sumExpfilImp.rds")
+data_all <- data_all[, !is.na(data_all$randomisation_code)]
+rowData(data_all)$variance <- assays(data_all)$loess %>% rowVars(na.rm = TRUE)
+#data_all <- data_all[rowData(data_all)$variance>0.2 | rowData(data_all)$variance<5, ]
+data_24h <- data_all[, data_all$time=="-24-"]
+data_48h <- data_all[, data_all$time=="-48-"]
+data_72h <- data_all[, data_all$time=="-72-"]
+```
+
+Initial data had `r dim(sumExpObj)[1]` proteins and `r dim(sumExpObj)[2]` samples which was filtered to `r `dim(data_all)[1]` proteins and `r dim(data_all)[2]` samples.
+Out of 210, 7 samples had NA values for randomization code variable and were exluded from analyses.
+
+### Normalization 
+Data was normalised using `limma::normalizeCyclicLoess()` function provided by Limma package in R. 
+
+### Exploratory PCA analyses
+
+Principle component analyses was used to perform exploratory analyses of the proteomics data. Explained variance by each principle component was calculated using the output from prcomp´ function in R. Correlation between principle components and phenotype (clinical) variables was calculated using ´lm´ function in R and "adj.r.squared" values were extracted from the summary statistics produced by the ´lm´ function.
+
+## Statistical analyses
+
+The likely differentially abundant proteins were extracted by using `topTable()`function. We used the "BH" (aka "fdr") and "BY" methods of Benjamini, Hochberg, and Yekutieli control the false discovery rate, the expected proportion of false discoveries among the rejected hypotheses. 
+
+## Variables and models
+
+In general, the data from three time points, 24h with `r dim(data_24h)[2]`, 48h `r dim(data_48h)[2]` and 72 `r dim(data_72h)[2]`hours were analyzed separately for uni variate statistics. And the interaction term was included in the model formula wherever applicable.
+
+### Randomization code (0 0r 1):
+
+Positive change indicates upregulation in 1 vs 0. Negative fold change indicates downregulation in 1.
+
+```{r, warning=FALSE, echo=FALSE}
+knitr::kable(rbind(t1 = table(data_24h$randomisation_code), t2= table(data_48h$randomisation_code), t3=table(data_72h$randomisation_code)))
+```
+### CPC Score (0 or 1): 
+
+Positive change indicates upregulation in 1 vs 0. Negative fold change indicates downregulation in 1. 
+
+```{r, warning=FALSE, echo=FALSE}
+knitr::kable(rbind(t1 = table(data_24h$binarysecout180daycpcscore), t2= table(data_48h$binarysecout180daycpcscore), t3=table(data_72h$binarysecout180daycpcscore)))
+```
+
+### Shockable vs. non shockable heart:
+
+Positive change indicates upregulation in 1 vs 0. Negative fold change indicates downregulation in 1.
+Samples with NA values were filtered out.
+
+```{r, echo=FALSE, warning=FALSE}
+knitr::kable(rbind(t1 = table(data_24h$shockable), t2= table(data_48h$shockable), t3=table(data_72h$shockable)))
+```
+
+## Dead vs. Alive at 72h:
+
+Positive change indicates upregulation in 1 vs 0. Negative fold change indicates downregulation in 1.
+
+In total there were `r table(data_all$dead72)[2]` dead events at 72 hours. 
+
+## Dead vs. Alive at followup:
+
+Positive change indicates upregulation in 1 vs 0. Negative fold change indicates downregulation in 1. 
+in total `r table(data_all$deadatfollowup)[2]` patients had died at followup.
+
+
+
+## Interactions
+
+Model formulae for interactions tested was as following. The interpretation of these would based on the boxplots as layed out in the figures.
+
+~ 1 + randomisation_code*binarysecout180daycpcscore
+
+~ 1 + randomisation_code*shockable
+
+## Heatmaps
+
+The significantly differentially abundant protein (adj p < 0.05) at any of the timepoint for respective predictor variable was extracted. Plots of respective fold changes were plotted in a heatmap. Heatmap Plots of individual protein intensities were also provided. 
+
+
+## References
+
+```{r, echo=FALSE}
+packages = c("base","mice", "limma")
+knitr::write_bib(packages, "packages.bib")
+knitr::write_bib(packages)
+```
+

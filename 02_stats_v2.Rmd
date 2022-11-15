@@ -1,0 +1,907 @@
+---
+title: "Univariate statistical analyses to identify diffrentially abundant proteins."
+author: "Ashfaq Ali"
+date: "30/11/2021"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, 
+                      collapse = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      cache = FALSE, 
+                      cache.path = "../cache/", 
+                      fig.height = 5, 
+                      fig.width = 6,
+                      eval=TRUE)
+```
+
+```{r setup1, echo=FALSE ,include=FALSE}
+# import libraries and data
+
+library(tidyverse)
+library(reshape2)
+library(readxl)
+library(fuzzyjoin)
+library(limma)
+library(DBI)
+library(ggplot2)
+#library(BiocGenerics)
+#library(devtools)
+#library(qvalue)
+library(pheatmap)
+library(RColorBrewer)
+library(SummarizedExperiment)
+```
+
+# Summary
+
+
+This document contains analyses code to identify differential abundant proteins using uni variate approach where `limma()` package in R was used to compare abundance differences for following grouping variables.
+
+As batch effect was observed in the in the data and analyses between different time-points maybe confounded by the batch, protein data from the 3 time-points was analysed separately.
+
+1) Temperature (Randomisation code)
+2) cpc score (dichotamised)
+3) Temperature:CPC score interaction
+4) Shockable vs. non-shockable heart
+
+
+## Import data and perform statistics
+
+Protein annotations were requested 
+
+```{r, echo=FALSE, include=FALSE}
+data_all <- readRDS("../rawaDataSe_fixedIDs.rds")
+#data_all <- readRDS("../normalized_filtered_se.rds")
+data_all <- data_all[, !is.na(data_all$randomisation_code)]
+rowData(data_all)$variance <- assays(data_all)$loess %>% rowVars(na.rm = TRUE)
+#data_all <- data_all[rowData(data_all)$variance>0.2 | rowData(data_all)$variance<5, ]
+data_24h <- data_all[, data_all$time=="-24-"]
+data_48h <- data_all[, data_all$time=="-48-"]
+data_72h <- data_all[, data_all$time=="-72-"]
+data <- list(loess_data= assays(data_all)$loess %>% as.data.frame() %>% rownames_to_column(., var = "Protein.Group") , sample_data=colData(data_all) %>% as.data.frame() %>% rownames_to_column(., var = "Sample_ID"), proetin_anno=as.data.frame(rowData(data_all)))
+writexl::write_xlsx(x = data , "./Results/Data_v2.xlsx")
+```
+
+
+## 1) Temperature Randomization code
+
+```{r, eval=FALSE, include=FALSE}
+
+
+#designAll <- model.matrix(~ 1 + data_all$randomisation_code)
+design24h <- model.matrix(~ 1 + data_24h$randomisation_code)
+design48h <- model.matrix(~ 1 + data_48h$randomisation_code)
+design72h <- model.matrix(~ 1 + data_72h$randomisation_code)
+
+#colnames(designAll) <- c("(Intercept)", "rand_cod")
+colnames(design24h) <- c("(Intercept)", "rand_cod")
+colnames(design48h) <- c("(Intercept)", "rand_cod")
+colnames(design72h) <- c("(Intercept)", "rand_cod")
+
+
+Results <- list()
+
+# fitAll <- lmFit((assays(data_all)$loess), design = designAll)
+# fitAll <- eBayes(fit = fitAll)
+# Results$All_rand <- topTable(fitAll, p.value = 1, number = Inf, coef = "rand_cod")
+
+fit24<- lmFit((assays(data_24h)$loess), design = design24h) 
+
+fit24 <- eBayes(fit = fit24)
+Results$rand24 <- topTable(fit24, p.value = 1, number = Inf, coef = "rand_cod") %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+    
+    
+fit48 <- lmFit((assays(data_48h)$loess), design = design48h)
+fit48 <- eBayes(fit = fit48)
+Results$rand_48 <- topTable(fit48, p.value = 1, number = Inf, coef = "rand_cod") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+
+fit72 <- lmFit((assays(data_72h)$loess), design = design72h)
+fit72 <- eBayes(fit = fit72)
+Results$rand72 <- topTable(fit72, p.value = 1, number = Inf, coef = "rand_cod") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+
+```
+
+```{r, eval=FALSE, include=FALSE}
+batches <- unique(data_all$time)
+Results_rand_v2 <- list()
+Results_dead72_v2 <- list()
+Results_folllow_up_v2 <- list()
+Results_cpc_v2 <- list()
+Results_shock_v2 <- list()
+Results_shock_int_v2 <- list()
+Results_cpc_int_v2 <- list()
+
+
+
+for  (i in 1:length(batches)){
+  data <- data_all[, data_all$time == batches[i]] 
+  data_shock <- data[, data$shockable!="NA"] 
+  #data <- season_batches[[batches[i]]]
+
+### Randomization code    
+  design_t <- model.matrix(~ 1 + randomisation_code, data = colData(data))
+  colnames(design_t) <- c("(Intercept)", "rand_cod")
+  
+fit<- lmFit((assays(data)$loess), design = design_t) 
+
+fit <- eBayes(fit = fit)
+
+Results_rand_v2[[batches[i]]] <- topTable(fit, p.value = 1, number = Inf, coef = "rand_cod", confint = TRUE) %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  left_join(rowData(data) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+}
+writexl::write_xlsx(Results_rand_v2, paste0("./Results/DE_results_rand_code_v2.xlsx"))
+saveRDS(Results_rand_v2, "./Results/DE_Results_rand_v2.rds")
+
+
+
+
+################# CPC dead at 72h  ############
+
+for  (i in 1:length(batches)){
+  data <- data_all[, data_all$time == batches[i]] 
+  
+design_d_72 <- model.matrix(~ 1 + dead72, data = colData(data))
+colnames(design_d_72) <- c("(Intercept)", "dead_72")
+
+  fit<- lmFit((assays(data)$loess), design = design_d_72) 
+
+fit <- eBayes(fit = fit)
+
+Results_dead72_v2[[batches[i]]] <- topTable(fit, p.value = 1, number = Inf, coef = "dead_72", confint = TRUE) %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  left_join(rowData(data) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) }
+writexl::write_xlsx(Results_dead72_v2, paste0("./Results/DE_results_dead_at_72_v2.xlsx"))
+saveRDS(Results_dead72_v2, "./Results/DE_Results_dead_at_72_v2.rds")
+
+
+################# CPC dead at follow up  ############
+for  (i in 1:length(batches)){
+   data <- data_all[, data_all$time == batches[i]] 
+design_d_fup <- model.matrix(~ 1 + deadatfollowup, data = colData(data))
+colnames(design_d_fup) <- c("(Intercept)", "dead_fup")
+
+  fit<- lmFit((assays(data)$loess), design = design_d_fup) 
+
+fit <- eBayes(fit = fit)
+
+  Results_folllow_up_v2[[batches[i]]] <- topTable(fit, p.value = 1, number = Inf, coef = "dead_fup", confint = TRUE) %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  left_join(rowData(data) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+}
+writexl::write_xlsx(Results_folllow_up_v2, paste0("./Results/DE_results_dead_at_follow_up_v2.xlsx"))
+saveRDS(Results_folllow_up_v2, "./Results/DE_Results_dead_at_follow_up_v2.rds")
+
+
+################# CPC Score ############
+
+for  (i in 1:length(batches)){
+  data <- data_all[, data_all$time == batches[i]] 
+design_cpc <- model.matrix(~ 1 + binarysecout180daycpcscore, data = colData(data))
+colnames(design_cpc) <- c("(Intercept)", "cpc_score")
+
+fit<- lmFit((assays(data)$loess), design = design_cpc) 
+
+fit <- eBayes(fit = fit)
+
+Results_cpc_v2[[batches[i]]] <- topTable(fit, p.value = 1, number = Inf, coef = "cpc_score", confint = TRUE) %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  left_join(rowData(data) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+}
+writexl::write_xlsx(Results_cpc_v2, paste0("./Results/DE_results_cpc_score_v2.xlsx"))
+saveRDS(Results_cpc_v2, "./Results/DE_Results_cpc_v2.rds")
+
+
+##############3 Shock variable ###########
+## 
+
+for  (i in 1:length(batches)){
+  data <- data_all[, data_all$time == batches[i]] 
+  
+design_shock <- model.matrix(~ 1 + shockable, data = colData(data_shock))
+colnames(design_shock) <- c("(Intercept)", "shock")
+fit<- lmFit((assays(data_shock)$loess), design = design_shock) 
+
+fit <- eBayes(fit = fit)
+
+Results_shock_v2[[batches[i]]] <- topTable(fit, p.value = 1, number = Inf, coef = "shock", confint = TRUE) %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  left_join(rowData(data) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+}
+writexl::write_xlsx(Results_shock_v2, paste0("./Results/DE_results_shockable_vs_non_shockable_v2.xlsx"))
+saveRDS(Results_shock_v2, "./Results/DE_Results_shock_v2.rds")
+
+
+################## Interaction with CPC #################
+## 
+for  (i in 1:length(batches)){
+  data <- data_all[, data_all$time == batches[i]] 
+design_cpc_int <- model.matrix(~ 1 + randomisation_code*binarysecout180daycpcscore, data = colData(data))
+
+# colnames(designAll) <- c("(Intercept)", "rand_cod", "pcscore", "rand_codXpcscore")
+colnames(design_cpc_int) <- c("(Intercept)", "rand_cod", "cpc", "rand_codXcpc")
+fit<- lmFit((assays(data)$loess), design = design_cpc_int) 
+
+fit <- eBayes(fit = fit)
+
+Results_cpc_int_v2[[batches[i]]] <- topTable(fit, p.value = 1, number = Inf, coef = "rand_codXcpc", confint = TRUE) %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  left_join(rowData(data) |> as_tibble(),
+    {
+      .
+    },
+    
+    by ="ID"
+  ) 
+}
+writexl::write_xlsx(Results_cpc_int_v2, paste0("./Results/DE_results_cpc_rand_Code_int_v2.xlsx"))
+saveRDS(Results_cpc_int_v2, "./Results/DE_results_cpc_int_v2.rds")
+
+
+############## Rand_shock interaction  ##############
+for  (i in 1:length(batches)){
+  data <- data_all[, data_all$time == batches[i]] 
+data_shock <- data[, !(data$shockable=="NA")] 
+data_shock$shockable <- droplevels(data_shock$shockable)
+design_shock_int <- model.matrix(~ 1 + randomisation_code*shockable, data = colData(data_shock))
+colnames(design_shock_int) <- c("(Intercept)", "rand_cod", "shock", "rand_codXshock")
+fit<- lmFit((assays(data_shock)$loess), design = design_shock_int) 
+
+fit <- eBayes(fit = fit)
+
+Results_shock_int_v2[[batches[i]]] <- topTable(fit, p.value = 1, number = Inf, coef = "rand_codXshock", confint = TRUE) %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  left_join(rowData(data_shock) |> as_tibble(),
+    {
+      .
+    },
+    
+    by ="ID"
+  )
+}
+writexl::write_xlsx(Results_shock_int_v2, paste0("./Results/DE_results_shock_rand_Code_int_v2.xlsx"))
+saveRDS(Results_shock_int_v2, "./Results/DE_results_shock_rand_Code_int_v2.rds")
+
+```
+****************************************************
+
+
+```{r, eval=FALSE, include=FALSE}
+
+# designAll <- model.matrix(~ 1 + data_all$binarysecout180daycpcscore)
+design24h <- model.matrix(~ 1 + data_24h$binarysecout180daycpcscore)
+design48h <- model.matrix(~ 1 + data_48h$binarysecout180daycpcscore)
+design72h <- model.matrix(~ 1 + data_72h$binarysecout180daycpcscore)
+
+#colnames(designAll) <- c("(Intercept)", "pcscore")
+colnames(design24h) <- c("(Intercept)", "pcscore")
+colnames(design48h) <- c("(Intercept)", "pcscore")
+colnames(design72h) <- c("(Intercept)", "pcscore")
+
+
+#Results2 <- list()
+
+# fitAll <- lmFit((assays(data_all)$loess), design = designAll)
+# fitAll <- eBayes(fit = fitAll)
+# Results$All_pcscore <- topTable(fitAll, p.value = 1, number = Inf, coef = "pcscore")
+
+fit24<- lmFit((assays(data_24h)$loess), design = design24h)
+fit24 <- eBayes(fit = fit24)
+Results$pcscore24 <- topTable(fit24, p.value = 1, number = Inf, coef = "pcscore") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+
+fit48 <- lmFit((assays(data_48h)$loess), design = design48h)
+fit48 <- eBayes(fit = fit48)
+Results$pcscore48 <- topTable(fit48, p.value = 1, number = Inf, coef = "pcscore") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+
+fit72 <- lmFit((assays(data_72h)$loess), design = design72h)
+fit72 <- eBayes(fit = fit72)
+Results$pcscore72 <- topTable(fit72, p.value = 1, number = Inf, coef = "pcscore") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+
+rm(fit24, fit48h, fit72, design24h, design48h, design72h)
+#saveRDS(Results, "../DEResults.rds")
+```
+
+
+### Tables {.tabset}
+
+```{r, eval=FALSE, include=FALSE}
+# designAll <- model.matrix(~ 1 + data_all$randomisation_code*data_all$binarysecout180daycpcscore)
+design24h <- model.matrix(~ 1 + data_24h$randomisation_code*data_24h$binarysecout180daycpcscore)
+design48h <- model.matrix(~ 1 + data_48h$randomisation_code*data_48h$binarysecout180daycpcscore)
+design72h <- model.matrix(~ 1 + data_72h$randomisation_code*data_72h$binarysecout180daycpcscore)
+
+# colnames(designAll) <- c("(Intercept)", "rand_cod", "pcscore", "rand_codXpcscore")
+colnames(design24h) <- c("(Intercept)", "rand_cod", "pcscore", "rand_codXpcscore")
+colnames(design48h) <- c("(Intercept)", "rand_cod", "pcscore", "rand_codXpcscore")
+colnames(design72h) <- c("(Intercept)", "rand_cod", "pcscore", "rand_codXpcscore")
+
+
+#Results2 <- list()
+# 
+# fitAll <- lmFit((assays(data_all)$loess), design = designAll)
+# fitAll <- eBayes(fit = fitAll)
+# Results$All_randpcs_int <- topTable(fitAll, p.value = 1, number = Inf, coef = "rand_codXpcscore")
+
+fit24<- lmFit((assays(data_24h)$loess), design = design24h)
+fit24 <- eBayes(fit = fit24)
+Results$randpcs_int24 <- topTable(fit24, p.value = 1, number = Inf, coef = "rand_codXpcscore") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+
+fit48 <- lmFit((assays(data_48h)$loess), design = design48h)
+fit48 <- eBayes(fit = fit48)
+Results$randpcs_int48 <- topTable(fit48, p.value = 1, number = Inf, coef = "rand_codXpcscore") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+
+fit72 <- lmFit((assays(data_72h)$loess), design = design72h)
+fit72 <- eBayes(fit = fit72)
+Results$randpcs_int72 <- topTable(fit72, p.value = 1, number = Inf, coef = "rand_codXpcscore") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+#saveRDS(Results, "../NBIS_analyses/Results/DEResults.rds")
+```
+
+##4) Dead vs Alive at 72h
+
+No patients were declared dead at 24 or 48 hours, therefor death at 72 hours was used for assications with proteins at 24, 48, and 72 hours.
+
+
+
+```{r}
+
+# designAll <- model.matrix(~ 1 + data_all$binarysecout180daycpcscore)
+design24h <- model.matrix(~ 1 + data_24h$dead72)
+design48h <- model.matrix(~ 1 + data_48h$binarysecout180daycpcscore)
+design72h <- model.matrix(~ 1 + data_72h$binarysecout180daycpcscore)
+
+#colnames(designAll) <- c("(Intercept)", "pcscore")
+colnames(design24h) <- c("(Intercept)", "pcscore")
+colnames(design48h) <- c("(Intercept)", "pcscore")
+colnames(design72h) <- c("(Intercept)", "pcscore")
+
+
+#Results2 <- list()
+
+# fitAll <- lmFit((assays(data_all)$loess), design = designAll)
+# fitAll <- eBayes(fit = fitAll)
+# Results$All_pcscore <- topTable(fitAll, p.value = 1, number = Inf, coef = "pcscore")
+
+fit24<- lmFit((assays(data_24h)$loess), design = design24h)
+fit24 <- eBayes(fit = fit24)
+Results$pcscore24 <- topTable(fit24, p.value = 1, number = Inf, coef = "pcscore") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+
+fit48 <- lmFit((assays(data_48h)$loess), design = design48h)
+fit48 <- eBayes(fit = fit48)
+Results$pcscore48 <- topTable(fit48, p.value = 1, number = Inf, coef = "pcscore") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+
+fit72 <- lmFit((assays(data_72h)$loess), design = design72h)
+fit72 <- eBayes(fit = fit72)
+Results$pcscore72 <- topTable(fit72, p.value = 1, number = Inf, coef = "pcscore") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+
+rm(fit24, fit48h, fit72, design24h, design48h, design72h)
+#saveRDS(Results, "../DEResults.rds")
+```
+
+##5) Dead at follow up
+
+
+
+
+##6) Interaction analyses Shockabl*Randomization code
+
+
+```{r}
+# designAll <- model.matrix(~ 1 + data_all$randomisation_code*data_all$binarysecout180daycpcscore)
+design24h <- model.matrix(~ 1 + data_24h$randomisation_code*data_24h$shockable)
+design48h <- model.matrix(~ 1 + data_48h$randomisation_code*data_48h$shockable)
+design72h <- model.matrix(~ 1 + data_72h$randomisation_code*data_72h$shockable)
+
+# colnames(designAll) <- c("(Intercept)", "rand_cod", "pcscore", "rand_codXpcscore")
+colnames(design24h) <- c("(Intercept)", "rand_cod", "shock", "rand_codXshock")
+colnames(design48h) <- c("(Intercept)", "rand_cod", "shock", "rand_codXshock")
+colnames(design72h) <- c("(Intercept)", "rand_cod", "shock", "rand_codXshock")
+
+
+#Results2 <- list()
+# 
+# fitAll <- lmFit((assays(data_all)$loess), design = designAll)
+# fitAll <- eBayes(fit = fitAll)
+# Results$All_randpcs_int <- topTable(fitAll, p.value = 1, number = Inf, coef = "rand_codXpcscore")
+
+fit24 <- lmFit((assays(data_24h)$loess), design = design24h)
+fit24 <- eBayes(fit = fit24)
+Results$randpcs_int24 <- topTable(fit24, p.value = 1, number = Inf, coef = "rand_codXshock") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+
+fit48 <- lmFit((assays(data_48h)$loess), design = design48h)
+fit48 <- eBayes(fit = fit48)
+Results$randpcs_int48 <- topTable(fit48, p.value = 1, number = Inf, coef = "rand_codXshock") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+
+fit72 <- lmFit((assays(data_72h)$loess), design = design72h)
+fit72 <- eBayes(fit = fit72)
+Results$randpcs_int72 <- topTable(fit72, p.value = 1, number = Inf, coef = "rand_codXshock") %>%
+  rownames_to_column(., var = "ID") %>%
+ # arrange(padj) %>%
+  right_join(rowData(data_all) |> as_tibble(),
+    {
+      .
+    },
+    by ="ID"
+  ) 
+#saveRDS(Results, "../NBIS_analyses/Results/DEResults.rds")
+```
+
+
+```{r, include=FALSE, include=TRUE}
+Results <- readRDS("../NBIS_analyses/Results/DEResults.rds")
+sig1 <- lapply(Results, function(x) {dplyr::filter(x, adj.P.Val<0.05)})
+#sig1 <- within(sig1, rm(All_rand, All_pcscore))
+#sig_rand <- 
+sig1List <- unlist(lapply(Results, function(x) {dplyr::filter(x, adj.P.Val < 0.05) %>% rownames(x)}), use.names = FALSE) %>% unique() ## Extract significant proteins at all time points
+
+rowData(data_all)$variance <- assays(data_all)$loess %>% rowVars(na.rm = TRUE)
+data_f <- data_all[rownames(data_all) %in% sig1List, ]
+```
+
+#### Association with randomization code at 24 h
+
+No significant associations were found at 24h with temperature randomization.
+
+```{r}
+#DT::datatable(round(sig1$rand_24,5))
+```
+#### Association with randomization code at 48 h
+
+Six proteins were associated with temperature randomization at 48h
+
+```{r}
+DT::datatable(round(sig1$rand_48,5))
+```
+#### Association with randomization code at 72 h
+
+No significant associations with temperature randomization were found at 72h.
+
+```{r}
+#DT::datatable(round(sig1$rand_72,5))
+```
+
+
+### Heat Plots for randomization code {.tabset}
+
+We selected all proteins significantly regulated with randomization code. In this analyses 6 Proteins associated with randomization code were found only at 48 timepoint.
+
+
+#### Heatmap of siginificatly associated protein with temperature randomization
+
+```{r}
+### Heatmap for significantly DE proteins
+sig_rand <- unlist(lapply(sig1[1:3], rownames, usenames)) %>% as.vector()
+#intData <- assays(data_24h)$loess[sig_rand,]
+intData <- data_24h[sig_rand,]
+#png("../Results/Figures/HeatmapInt.png", units = "cm", height = 30, width = 30,res = 300)
+pheatmap(assays(intData)$loess, filename = "./Results/Figures/rand_code_full.pdf",
+         display_numbers=FALSE, 
+         fontsize=7, 
+         cluster_cols=TRUE, 
+         cluster_rows = FALSE, 
+         scale = "row",
+         labels_col =  intData$randomisation_code)
+#dev.off()
+```
+
+#### Heatmap of foldchanges at 3 timepoints
+
+```{r, fig.cap="Heatmap of foldchanges at 3 timepoints"}
+fcc <- as.matrix(bind_cols(Results$rand24[sig_rand,]$logFC, 
+                           Results$rand_48[sig_rand,]$logFC, 
+                           Results$rand72[sig_rand,]$logFC 
+                           )
+                 )
+
+dimnames(fcc) <- list(sig_rand, c("t1", "t2", "t3") )
+pheatmap(fcc, filename = "./Results/Figures/rand_code_foldchage.pdf",
+         cluster_cols = FALSE, 
+         cellwidth = 12, 
+         cellheight = 20)
+
+```
+
+## 2) Results for cpc score phenotype variable tables 
+
+### 2A) Tables {.tabset}
+
+#### Association with randomization code at 24 h 
+
+In total `r sum(Results$pcscore24$adj.P.Val <0.05)` proteins were significantly regulated at 24h timepoint in association with CPC score.
+
+```{r}
+DT::datatable(round(head(Results$pcscore24, 10),5))
+```
+
+#### Association with randomization code at 48 h
+
+In total `r sum(Results$pcscore48$adj.P.Val <0.05)` proteins were significantly regulated at 48h timepoint in association with PCS score.
+
+```{r}
+DT::datatable(round(head(Results$pcscore48, 10),5))
+```
+
+#### Association with randomization code at 72 h
+
+In total `r sum(Results$pcscore72$adj.P.Val <0.05)` proteins were significantly regulated at 72h timepoint in association with PCS score.
+
+```{r}
+DT::datatable(round(head(Results$pcscore72, 10),5))
+```
+
+### 2B) Figures {.tabset}
+
+#### Heatmap of significantly associated proteins at all three time-points
+
+```{r}
+### Heatmap for significantly DE proteins
+sig_pcs <- unlist(lapply(sig1[4:6], rownames, usenames)) %>% as.vector() %>% unique()
+#intData <- assays(data_24h)$loess[sig_rand,]
+intData <- data_24h[sig_pcs,]
+
+#png("../Results/Figures/HeatmapInt.png", units = "cm", height = 30, width = 30,res = 300)
+pheatmap(assays(intData)$loess, filename = "./Results/Figures/cpc_heatmap_full.pdf",
+         display_numbers=FALSE, 
+         fontsize=7, 
+         cluster_cols=TRUE, 
+         cluster_rows = FALSE,
+         scale = "row",
+         labels_col =  intData$binarysecout180daycpcscore)
+#dev.off()
+```
+
+#### Heatmap of Foldchanges of significantly associated proteins at three timepoints 
+
+```{r}
+fcc_pcs <- as.matrix(bind_cols(Results$pcscore24[sig_pcs,]$logFC, 
+                           Results$pcscore48[sig_pcs,]$logFC, 
+                           Results$pcscore72[sig_pcs,]$logFC 
+                           )
+                 )
+
+dimnames(fcc_pcs) <- list(sig_pcs, c("t1", "t2", "t3") )
+
+pheatmap(fcc_pcs, filename = "./Results/Figures/cpcheatmap_foldchanges.pdf", 
+         cluster_cols = FALSE, 
+         cellwidth = 12, 
+         cellheight = 9)
+
+```
+
+### 2C) PCS * Temperature interaction {.tabset}
+
+> Would it be
+possible to switch these colours so that the *poor outcome is in red andn good outcome is in blue*? We have also agreed that the accepted terms for
+the CPC-outcome are *good outcome and poor outcome*.
+*Instead of 0 and 1 on the x-axis, would it be possible to use 36°C (1) and 33°C (0)?* and *change the label of the x-axis to temperature treatment?*.
+>
+
+
+#### Interaction at 48 hours p.adj = 0.17, P = 0.0004294011
+```{r, fig.cap= "Boxplot indicating differential effect of temeprature randomization in different CPC score categories on protein P08294 intensity"}
+intData1 <- assays(data_24h)$loess["P08294",]
+tDatat <- cbind(as.data.frame(colData(data_24h)),intData1)
+
+# Change the position
+p <-ggplot(tDatat, aes(x = as.factor(randomisation_code), y = intData1, fill= as.factor(binarysecout180daycpcscore))) +
+  geom_boxplot(position=position_dodge(1)) +
+  scale_fill_discrete(name="180 day\nCPC Score",
+                         breaks=c("0", "1"),
+                         labels=c("Functional", "Impaired"))+
+  labs(title="CPC Score*Temperature interaction for\nExtracellular superoxide dismutase(P08294) at 48h", x="Temperature randomization Category" , y= expression("Log"[2]~"protein intensity"))
+
+p <- p + geom_dotplot(binaxis='y', stackdir='center',
+                 position=position_dodge(1))
+
+ggsave(p, filename = "./Results/Figures/CPC ScoreXTemperature.pdf")
+
+
+```
+
+#### Interaction at 3 timepoints
+
+```{r, eval=TRUE, include=TRUE}
+data_all <- readRDS("../data_sumExpfilImp.rds")
+#data_all <- readRDS("../normalized_filtered_se.rds")
+data_all_f <- data_all[, (data_all$shockable=="0" | data_all$shockable==1) & !is.na(data_all$shockable)]
+rowData(data_all)$variance <- assays(data_all)$loess %>% rowVars(na.rm = TRUE)
+#data_all <- data_all[rowData(data_all)$variance>0.2 | rowData(data_all)$variance<5, ]
+#saveRDS(data_all_f,"../data_all_f.rds")
+data_24h <- data_all_f[, data_all_f$time=="-24-"]
+data_48h <- data_all_f[, data_all_f$time=="-48-"]
+data_72h <- data_all_f[, data_all_f$time=="-72-"]
+```
+
+```{r, warning=FALSE}
+intData2 <- assays(data_all_f)$loess["P08294",]
+tDatat2 <- cbind(as.data.frame(colData(data_all_f)),intData2)
+
+p<-ggplot(tDatat2, aes(x = as.factor(randomisation_code), y = intData2, fill= as.factor(binarysecout180daycpcscore))) +
+  geom_boxplot(position=position_dodge(1)) +
+  scale_fill_discrete(name="180 day\nPCS Score",
+                         breaks=c("0", "1"),
+                         labels=c("Functional", "Impaired"))+
+  labs(title="PCS Score*Temperature interaction for\nExtracellular superoxide dismutase(P08294) at 3 time points", x="Temperature randomization Category" , y= expression("Log"[2]~"protein intensity")) + facet_grid(~time)
+
+
+p <- p +geom_dotplot(binaxis='y', stackdir='center',
+                 position=position_dodge(1))
+
+ggsave(p, filename = "./Results/Figures/CPC ScoreXTemperature_timePoints.pdf")
+```
+
+
+##3) Shockable vs.non Shockable differential abundance analyses
+
+
+
+```{r, include=FALSE, eval=FALSE}
+
+
+#designAll <- model.matrix(~ 1 + data_all$randomisation_code)
+design24h <- model.matrix(~ 1 + data_24h$shockable)
+design48h <- model.matrix(~ 1 + data_48h$shockable)
+design72h <- model.matrix(~ 1 + data_72h$shockable)
+
+#colnames(designAll) <- c("(Intercept)", "rand_cod")
+colnames(design24h) <- c("(Intercept)", "shock")
+colnames(design48h) <- c("(Intercept)", "shock")
+colnames(design72h) <- c("(Intercept)", "shock")
+
+
+Results_shock <- list()
+
+# fitAll <- lmFit((assays(data_all)$loess), design = designAll)
+# fitAll <- eBayes(fit = fitAll)
+# Results$All_rand <- topTable(fitAll, p.value = 1, number = Inf, coef = "rand_cod")
+
+fit24<- lmFit((assays(data_24h)$loess), design = design24h)
+fit24 <- eBayes(fit = fit24)
+Results_shock$shock24 <- topTable(fit24, p.value = 1, number = Inf, coef = "shock")
+
+fit48 <- lmFit((assays(data_48h)$loess), design = design48h)
+fit48 <- eBayes(fit = fit48)
+Results_shock$shock48 <- topTable(fit48, p.value = 1, number = Inf, coef = "shock")
+
+fit72 <- lmFit((assays(data_72h)$loess), design = design72h)
+fit72 <- eBayes(fit = fit72)
+Results_shock$shock72 <- topTable(fit72, p.value = 1, number = Inf, coef = "shock")
+#saveRDS(Results_shock, "../NBIS_analyses/Results/Results_shock.rds")
+```
+
+### Tables{.tabset}
+
+```{r}
+Results_shock <- readRDS("../NBIS_analyses/Results/Results_shock.rds")
+```
+
+#### 24h
+
+In total `r sum(Results_shock$shock24$adj.P.Val <0.05)` proteins were significantly regulated at 24h timepoint in association with Shock variable.
+
+```{r}
+Results_shock <- readRDS("../NBIS_analyses/Results/Results_shock.rds")
+DT::datatable(round(head(Results_shock$shock24, 10),5))
+```
+
+
+#### 48h
+
+In total `r sum(Results_shock$shock48$adj.P.Val <0.05)` proteins were significantly regulated at 48h timepoint in association with Shock variable.
+
+
+```{r}
+DT::datatable(round(head(Results_shock$shock48, 10),5))
+```
+
+#### 72h
+
+In total `r sum(Results_shock$shock72$adj.P.Val <0.05)` proteins were significantly regulated at 72h timepoint in association with Shock variable.
+
+
+```{r}
+DT::datatable(round(head(Results_shock$shock72, 10),5))
+```
+
+
+### Figures{.tabset}
+
+#### Heatmap of proteins at 24h
+
+```{r, fig.cap="Heat map of Protein instensities in all samples"}
+### Heatmap for significantly DE proteins
+sigs <- lapply(Results_shock, function(x) {dplyr::filter(x, adj.P.Val<0.05)})
+sig_shock <- unlist(lapply(sigs, rownames, usenames)) %>% as.vector() %>% unique()
+#intData <- assays(data_24h)$loess[sig_rand,]
+intDatas <- data_24h[sig_shock,]
+intDatas
+#png("../Results/Figures/HeatmapInt.png", units = "cm", height = 30, width = 30,res = 300)
+pheatmap(assays(intDatas)$loess, filename = "./Results/Figures/Shockheatmap_full.pdf",
+         display_numbers=FALSE, 
+         fontsize=7, 
+         cluster_cols=TRUE, 
+         cluster_rows = TRUE,
+         scale = "row",
+         labels_col =  intDatas$shockable)
+
+```
+
+#### Heatmap of fold changes at 3 timepoints
+
+```{r, fig.cap="Heat map of Fold Changes at 3 timepoints"}
+fcc_shock <- as.matrix(bind_cols(Results_shock$shock24[sig_shock,]$logFC, 
+                           Results_shock$shock48[sig_shock,]$logFC, 
+                           Results_shock$shock72[sig_shock,]$logFC 
+                           )
+                 )
+
+dimnames(fcc_shock) <- list(sig_pcs, c("t1", "t2", "t3") )
+pheatmap(fcc_shock, filename = "./Results/Figures/Shockheatmap_foldchanges.pdf",
+         cluster_cols = FALSE, 
+         cellwidth = 12, 
+         cellheight = 9)
+
+
+```
+
+```{r}
+sessionInfo()
+```
+
